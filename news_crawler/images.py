@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""Helpers for finding article images and relinking them to local files."""
 
 import re
 from dataclasses import dataclass
@@ -20,13 +21,14 @@ _LAZY_ATTRS = [
 
 @dataclass
 class ImageCandidate:
+    """A candidate image reference discovered in extracted article markup."""
     original_url: str
     resolved_url: str
     tag_name: str
 
 
 def _parse_srcset(value: str) -> List[Tuple[str, Optional[int]]]:
-    # Returns list of (url, width) where width is in px if provided (e.g. "800w"), else None.
+    """Parse a `srcset` attribute into `(url, width)` tuples."""
     out: List[Tuple[str, Optional[int]]] = []
     for part in (value or "").split(","):
         part = part.strip()
@@ -47,6 +49,11 @@ def _parse_srcset(value: str) -> List[Tuple[str, Optional[int]]]:
 
 
 def _pick_from_srcset(srcset: str, *, max_width: int = 1200) -> Optional[str]:
+    """Choose a practical candidate from `srcset`.
+
+    The goal is to save a reasonably large image for offline reading without
+    always pulling the largest possible original.
+    """
     candidates = _parse_srcset(srcset)
     if not candidates:
         return None
@@ -60,7 +67,7 @@ def _pick_from_srcset(srcset: str, *, max_width: int = 1200) -> Optional[str]:
 
 
 def _best_url_from_tag(tag: Tag) -> Optional[str]:
-    # srcset first (when present), then lazy attributes.
+    """Resolve the most useful URL from `img`/lazy-load attributes."""
     if tag.has_attr("srcset"):
         picked = _pick_from_srcset(str(tag.get("srcset") or ""))
         if picked:
@@ -74,7 +81,7 @@ def _best_url_from_tag(tag: Tag) -> Optional[str]:
 
 
 def iter_article_image_urls(content_root: BeautifulSoup, base_url: str) -> Iterable[ImageCandidate]:
-    # Article images inside the content fragment.
+    """Yield image candidates found inside the extracted article fragment."""
     for tag in content_root.find_all(["img", "source"]):
         if not isinstance(tag, Tag):
             continue
@@ -99,7 +106,7 @@ def iter_article_image_urls(content_root: BeautifulSoup, base_url: str) -> Itera
 
 
 def rewrite_images_to_local(content_root: BeautifulSoup, url_map: dict[str, str]) -> None:
-    # Mutates content_root: replace image URLs with local paths, drop srcset/sizes/lazy attrs.
+    """Rewrite extracted markup so archived HTML does not depend on the network."""
     for tag in content_root.find_all(["img", "source"]):
         if not isinstance(tag, Tag):
             continue
@@ -119,8 +126,8 @@ def rewrite_images_to_local(content_root: BeautifulSoup, url_map: dict[str, str]
         if original and original in url_map:
             tag["src"] = url_map[original]
         else:
-            # If this looks like an external image and we didn't archive it, drop the URL to avoid
-            # offline network fetch attempts.
+            # If archiving failed, prefer a visibly missing local image over an
+            # invisible background network request when the HTML is opened offline.
             def looks_external(u: str) -> bool:
                 u = (u or "").strip().lower()
                 return u.startswith("http://") or u.startswith("https://") or u.startswith("//")
@@ -144,7 +151,7 @@ def rewrite_images_to_local(content_root: BeautifulSoup, url_map: dict[str, str]
                 if "image-not-archived" not in cls:
                     cls.append("image-not-archived")
                 tag["class"] = cls
-        # Remove attributes that may trigger network fetches or cause confusion offline
+        # Drop attributes that can point back to remote sources or confuse offline rendering.
         for attr in list(tag.attrs.keys()):
             if attr in ("src", "alt", "title", "width", "height", "loading", "decoding", "class"):
                 continue

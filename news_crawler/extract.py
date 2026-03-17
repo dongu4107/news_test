@@ -1,4 +1,9 @@
 from __future__ import annotations
+"""Article extraction helpers built around readability-lxml.
+
+This module turns raw page HTML into a smaller article-focused fragment and
+collects a few metadata fields that are useful for archiving.
+"""
 
 from dataclasses import dataclass
 from typing import Any, Optional, Dict
@@ -17,6 +22,7 @@ else:
 
 @dataclass
 class ExtractedArticle:
+    """Normalized extraction result consumed by the archive pipeline."""
     title: Optional[str]
     content_html: Optional[str]  # cleaned article HTML fragment
     text: Optional[str]
@@ -30,6 +36,7 @@ class ExtractedArticle:
 def _first_meta(
     soup: BeautifulSoup, *, property_name: Optional[str] = None, name: Optional[str] = None
 ) -> Optional[str]:
+    """Return the first matching `<meta>` content value, if present."""
     if property_name:
         tag = soup.find("meta", attrs={"property": property_name})
         if tag and tag.get("content"):
@@ -42,6 +49,7 @@ def _first_meta(
 
 
 def _extract_meta(soup: BeautifulSoup, base_url: str) -> Dict[str, Optional[str]]:
+    """Collect best-effort article metadata from common meta tags."""
     canonical = None
     link = soup.find("link", attrs={"rel": lambda v: isinstance(v, (str, list)) and "canonical" in (v if isinstance(v, list) else [v])})
     if link and link.get("href"):
@@ -71,6 +79,12 @@ def _extract_meta(soup: BeautifulSoup, base_url: str) -> Dict[str, Optional[str]
 
 
 def extract_article(html: str, base_url: str) -> ExtractedArticle:
+    """Extract a readable article fragment from raw page HTML.
+
+    `readability-lxml` removes navigation, ads, and other page chrome. The
+    result is not meant to preserve the original site layout; it is meant to
+    preserve the article content in a portable form.
+    """
     soup = BeautifulSoup(html, "lxml")
     meta = _extract_meta(soup, base_url)
 
@@ -110,6 +124,6 @@ def extract_article(html: str, base_url: str) -> ExtractedArticle:
 
 
 def parse_content_fragment(content_html: str) -> Any:
-    # Wrap in a stable container so we can rewrite and then extract inner HTML safely.
+    """Wrap extracted markup in a stable container so it can be safely rewritten."""
     soup = BeautifulSoup(f"<div id=\"__article__\">{content_html}</div>", "lxml")
     return soup.find(id="__article__")

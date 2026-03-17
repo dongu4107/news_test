@@ -1,3 +1,11 @@
+"""Command-line entry point for the offline article archiver.
+
+The CLI is intentionally thin:
+- validate that runtime dependencies exist
+- parse user-facing options into ArchiveConfig
+- hand execution over to the archive pipeline
+"""
+
 import argparse
 import sys
 from pathlib import Path
@@ -5,6 +13,7 @@ from typing import List, Optional
 
 
 def _check_runtime_deps() -> None:
+    """Fail early with a clear message if required scraping libraries are missing."""
     missing = []
     for mod in ("httpx", "bs4", "readability", "lxml"):
         try:
@@ -22,6 +31,11 @@ def _check_runtime_deps() -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the user-facing CLI contract.
+
+    Keeping argument definitions in one place makes it easier to inspect the
+    supported archive behaviors without reading the pipeline implementation.
+    """
     parser = argparse.ArgumentParser(prog="news_crawler")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -56,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Parse CLI arguments and execute the requested subcommand."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

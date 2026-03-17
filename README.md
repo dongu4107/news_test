@@ -41,4 +41,4 @@ news_crawler archive --input urls.jsonl --out output
 
 - This is designed for offline reading (not pixel-perfect page capture).
 - Some sites block scraping or require login; those will be recorded as failures and may save `raw.html` depending on options.
-
+- Third-party library notes are documented in `THIRD_PARTY_NOTICES.md`.

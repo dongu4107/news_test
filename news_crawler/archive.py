@@ -1,8 +1,18 @@
 from __future__ import annotations
+"""Archive pipeline for turning article URLs into offline-readable bundles.
+
+The main responsibilities in this module are:
+- read URL input lists
+- fetch article HTML via HTTP and optional browser rendering
+- extract article-focused content
+- download related images and rewrite them to local paths
+- persist per-article metadata plus a batch-level results log
+"""
 
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple
@@ -38,6 +48,7 @@ _DEFAULT_BROWSER_UA = (
 
 @dataclass
 class ArchiveConfig:
+    """User-configurable knobs that control fetch, extraction, and output behavior."""
     input_path: Path
     out_dir: Path
     concurrency: int = 8
@@ -57,6 +68,7 @@ class ArchiveConfig:
 
 @dataclass
 class ImageRecord:
+    """Metadata captured for each image candidate associated with an article."""
     original_url: str
     resolved_url: str
     local_path: Optional[str]
@@ -68,6 +80,7 @@ class ImageRecord:
 
 @dataclass
 class ArchiveResult:
+    """Final per-URL outcome written to both metadata.json and results.jsonl."""
     input_url: str
     final_url: Optional[str]
     canonical_url: Optional[str]
@@ -87,6 +100,15 @@ class ArchiveResult:
 
 
 def _read_input_urls(path: Path) -> list[str]:
+    """Load URLs from either plain text or JSONL.
+
+    Text format:
+    - one URL per line
+    - empty lines and `#` comments are ignored
+
+    JSONL format:
+    - each line must be an object with a `url` field
+    """
     if not path.exists():
         raise FileNotFoundError(str(path))
 
@@ -113,6 +135,7 @@ def _read_input_urls(path: Path) -> list[str]:
 
 
 def _load_success_set(results_path: Path) -> set[str]:
+    """Collect previously successful URLs so reruns can skip finished work."""
     if not results_path.exists():
         return set()
     success: set[str] = set()
@@ -135,6 +158,7 @@ def _load_success_set(results_path: Path) -> set[str]:
 
 
 def _default_headers(cfg: ArchiveConfig) -> dict[str, str]:
+    """Build document request headers that resemble a normal browser navigation."""
     headers = {
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -157,6 +181,7 @@ def _default_headers(cfg: ArchiveConfig) -> dict[str, str]:
 
 
 def _origin(url: str) -> str:
+    """Reduce a full URL to `scheme://host[:port]` for Origin headers."""
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return url
@@ -164,6 +189,11 @@ def _origin(url: str) -> str:
 
 
 def _image_headers(img_url: str, referer: str, cfg: ArchiveConfig) -> Dict[str, str]:
+    """Build image request headers.
+
+    Some publishers hotlink-protect images and expect a plausible Referer/Origin
+    pair before returning the asset.
+    """
     headers = {
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
         "Accept-Language": cfg.accept_language,
@@ -181,6 +211,7 @@ def _image_headers(img_url: str, referer: str, cfg: ArchiveConfig) -> Dict[str, 
 
 
 def _classify_exception(exc: Exception) -> Tuple[Optional[str], List[str]]:
+    """Map transport/status failures to stable reason codes for diagnostics."""
     signals: List[str] = []
     reason: Optional[str] = None
 
@@ -226,6 +257,7 @@ def _classify_exception(exc: Exception) -> Tuple[Optional[str], List[str]]:
 
 
 def _classify_html_failure(html: Optional[str], *, status_code: Optional[int] = None) -> Tuple[Optional[str], List[str]]:
+    """Inspect returned HTML for common anti-bot, paywall, or challenge markers."""
     if not html:
         return None, []
 
@@ -278,6 +310,7 @@ def _classify_html_failure(html: Optional[str], *, status_code: Optional[int] = 
 
 
 async def _fetch_html_http(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    """Fetch article HTML with redirect following handled by the shared client."""
     resp = await client.get(url)
     resp.raise_for_status()
     final_url = str(resp.url)
@@ -297,6 +330,11 @@ async def _download_image(
     max_bytes: int,
     cfg: ArchiveConfig,
 ) -> Tuple[Optional[Path], Optional[str], Optional[str], Optional[int], Optional[str]]:
+    """Download one image candidate and persist it under a content-hash filename.
+
+    The hash-based filename lets multiple references to the same binary collapse
+    to a single local asset without additional bookkeeping.
+    """
     headers = _image_headers(img_url, referer, cfg)
     try:
         resp = await client.get(img_url, headers=headers)
@@ -315,10 +353,12 @@ async def _download_image(
 
 
 def _build_output_dir(cfg: ArchiveConfig, url: str) -> Path:
+    """Create a stable, human-readable article directory name."""
     return cfg.out_dir / f"{host_slug(url)}_{local_date_compact()}_{short_id(8)}"
 
 
 def _wrap_article_html(*, title: Optional[str], source_url: str, fetched_at: str, content_html: str) -> str:
+    """Embed extracted article markup into a minimal standalone HTML document."""
     safe_title = (title or "Article").strip()
     return f"""<!doctype html>
 <html lang="en">
@@ -382,6 +422,7 @@ def _escape_attr(text: str) -> str:
 
 
 def _excerpt(text: Optional[str], n: int = 280) -> Optional[str]:
+    """Build a short preview string for logs and metadata."""
     if not text:
         return None
     t = " ".join(text.split())
@@ -391,6 +432,7 @@ def _excerpt(text: Optional[str], n: int = 280) -> Optional[str]:
 
 
 def _domain(url: str) -> str:
+    """Extract a normalized hostname used for per-domain concurrency limits."""
     try:
         return urlparse(url).netloc.lower() or "unknown"
     except Exception:
@@ -398,6 +440,7 @@ def _domain(url: str) -> str:
 
 
 async def _with_retries(factory, retries: int, *, base_delay: float = 0.8):
+    """Execute an async operation with exponential backoff."""
     last_exc = None
     for attempt in range(retries + 1):
         try:
@@ -411,6 +454,17 @@ async def _with_retries(factory, retries: int, *, base_delay: float = 0.8):
     raise last_exc
 
 
+def _print_progress(event: str, url: str, *, elapsed_seconds: Optional[float] = None, detail: Optional[str] = None) -> None:
+    """Emit a compact per-URL progress line for terminal runs."""
+    parts = [event]
+    if elapsed_seconds is not None:
+        parts.append(f"{elapsed_seconds:.2f}s")
+    parts.append(url)
+    if detail:
+        parts.append(detail)
+    print(" | ".join(parts), flush=True)
+
+
 async def _archive_one(
     url: str,
     *,
@@ -422,6 +476,18 @@ async def _archive_one(
     results_lock: asyncio.Lock,
     results_path: Path,
 ) -> ArchiveResult:
+    """Process one URL end-to-end.
+
+    The work is intentionally serialized per article:
+    1. fetch HTML
+    2. extract readable content
+    3. optionally retry extraction via browser rendering
+    4. download and relink images
+    5. write output files and append batch results
+    """
+    started_at = time.perf_counter()
+    _print_progress("START", url)
+
     errors: List[str] = []
     fetched_at = utc_now_iso()
 
@@ -492,6 +558,8 @@ async def _archive_one(
 
         # 2) Extract article content via readability
         if html:
+            # HTML can be present even when the content is blocked or challenge-gated,
+            # so classify the page before trying readability extraction.
             reason, signals = _classify_html_failure(html, status_code=last_status_code)
             failure_reason = failure_reason or reason
             failure_signals.extend(signals)
@@ -548,6 +616,8 @@ async def _archive_one(
         resolved_seen: set[str] = set()
 
         if content_root and final_url:
+            # Only images inside the extracted article fragment are considered
+            # article-related. Site chrome and unrelated thumbnails are ignored.
             candidates = list(iter_article_image_urls(content_root, final_url))
             if cfg.max_images and len(candidates) > cfg.max_images:
                 candidates = candidates[: cfg.max_images]
@@ -679,10 +749,17 @@ async def _archive_one(
             with results_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(dataclass_to_dict(result), ensure_ascii=False) + "\n")
 
+        elapsed_seconds = time.perf_counter() - started_at
+        detail = f"method={method_used or 'unknown'} status={status}"
+        if failure_reason:
+            detail += f" reason={failure_reason}"
+        _print_progress("DONE" if status == "success" else "FAIL", final_url or url, elapsed_seconds=elapsed_seconds, detail=detail)
+
         return result
 
 
 async def _run(cfg: ArchiveConfig) -> list[ArchiveResult]:
+    """Run the batch archive job across all input URLs."""
     ensure_dir(cfg.out_dir)
     results_path = cfg.out_dir / "results.jsonl"
     success_set = set() if cfg.force else _load_success_set(results_path)
@@ -729,5 +806,5 @@ async def _run(cfg: ArchiveConfig) -> list[ArchiveResult]:
 
 
 def run_archive(cfg: ArchiveConfig) -> None:
-    # Synchronous entry point for CLI.
+    """Synchronous wrapper used by the CLI entry point."""
     asyncio.run(_run(cfg))

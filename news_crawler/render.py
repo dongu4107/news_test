@@ -1,4 +1,5 @@
 from __future__ import annotations
+"""Playwright-based HTML acquisition used as a fallback for JS-heavy pages."""
 
 import asyncio
 from dataclasses import dataclass
@@ -7,11 +8,17 @@ from typing import Optional, Dict
 
 @dataclass
 class RenderedPage:
+    """HTML snapshot returned from a browser-rendered page visit."""
     final_url: str
     html: str
 
 
 class RenderContext:
+    """Reusable browser context manager for fallback rendering.
+
+    A single browser instance is shared across URLs, while each fetch uses a new
+    isolated context so per-page state does not leak across requests.
+    """
     def __init__(
         self,
         *,
@@ -30,11 +37,13 @@ class RenderContext:
     async def create(
         *, max_concurrency: int = 2, user_agent: Optional[str] = None, accept_language: Optional[str] = None
     ) -> "RenderContext":
+        """Create and initialize a reusable rendering context."""
         ctx = RenderContext(max_concurrency=max_concurrency, user_agent=user_agent, accept_language=accept_language)
         await ctx._start()
         return ctx
 
     async def _start(self) -> None:
+        """Launch a headless Chromium instance on first use."""
         try:
             from playwright.async_api import async_playwright  # type: ignore
         except Exception as e:
@@ -46,6 +55,7 @@ class RenderContext:
         self._browser = await self._pw.chromium.launch(headless=True)
 
     async def close(self) -> None:
+        """Release the browser process and Playwright runtime."""
         if self._browser:
             await self._browser.close()
             self._browser = None
@@ -54,6 +64,7 @@ class RenderContext:
             self._pw = None
 
     async def fetch_html(self, url: str, *, timeout_ms: int = 20_000) -> RenderedPage:
+        """Render a page and return the resulting DOM snapshot."""
         if not self._browser:
             raise RuntimeError("RenderContext not started")
         async with self._sem:
